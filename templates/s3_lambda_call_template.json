@@ -1,0 +1,12 @@
+{"Records": [
+        {"eventVersion": "2.1", "eventSource": "aws:s3", "awsRegion": "ca-central-1", "eventTime": "2026-01-08T22: 36: 49.389Z", "eventName": "ObjectCreated:CompleteMultipartUpload", "userIdentity": {"principalId": "AWS:AIDA3OHSIRGPXQENK7O7P"
+            }, "requestParameters": {"sourceIPAddress": "172.31.9.128"
+            }, "responseElements": {"x-amz-request-id": "5Q108D0XR7729EXY", "x-amz-id-2": "IzN9tgeNDZ+fL+R7HBqQ9WYMDPT9dQA4XNRII87Fl2d8lKJh4dNtglCfl18O/+y4Jq1lAqOzxLIvV1yINe1u8EDwH4IVOpz9P5lzZDDB+TM="
+            }, "s3": {"s3SchemaVersion": "1.0", "configurationId": "66b027f8-9fc8-4ace-966a-fd8f909b317c", "bucket": {"name": "bucket_name", "ownerIdentity": {"principalId": "A2TIYGETRFY01R"
+                    }, "arn": "arn:aws:s3: : :ts-wkbch-file-uploads-bkt-fbef377"
+                }, "object": {"key": "object_name", "size": 24296880, "eTag": "e316f857715104839523ad20c46cdf33-3", "sequencer": "0069603180ED3AD590"
+                }
+            }
+        }
+    ]
+}
