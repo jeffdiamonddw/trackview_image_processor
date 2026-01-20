@@ -190,6 +190,78 @@ def download_s3_file(s3_full_path: str, local_path: str):
         print(f"❌ Unexpected error: {e}")
 
 
+import subprocess
+import json
+
+from PIL import Image
+from defusedxml import ElementTree as ET
+import io
+
+def extract_phaseone_orientation(image_path):
+    """
+    Extracts Gimbal Yaw, Pitch, and Roll from Phase One XMP metadata.
+    Supports .JPG, .TIF, and some .IIQ formats via Pillow.
+    """
+    with tempfile.NamedTemporaryFile() as temp_file:
+        download_s3_file(image_path, temp_file.name)# Read all XMP metadata into a dictionary
+            
+        
+        with Image.open(temp_file.name) as img:
+            xmp_data = img.info.get("xmp") or img.info.get("XML:com.adobe.xmp")
+        
+    if not xmp_data:
+        return {"error": "No XMP metadata found in image."}
+
+    # 2. Handle bytes to string conversion
+    if isinstance(xmp_data, bytes):
+        xmp_str = xmp_data.decode("utf-8", errors="ignore")
+    else:
+        xmp_str = xmp_data
+
+    # 3. Parse XML safely
+    # Note: We strip namespace prefixes for easier dictionary access
+    root = ET.fromstring(xmp_str)
+    
+    # Phase One uses 'GPSIMUYaw', 'GPSIMUPitch', and 'GPSIMURoll'
+    # These are usually inside the rdf:Description element
+    telemetry = {
+        "yaw": None,
+        "pitch": None,
+        "roll": None
+    }
+
+    # Search the XML for the specific Phase One tags
+    # These can appear as attributes or nested elements
+    for desc in root.iter("{http://www.w3.org}Description"):
+        # Check Attributes (common in Phase One XMP)
+        attrs = desc.attrib
+        telemetry["yaw"] = attrs.get("{http://ns.phaseone.com}GPSIMUYaw") or telemetry["yaw"]
+        telemetry["pitch"] = attrs.get("{http://ns.phaseone.com}GPSIMUPitch") or telemetry["pitch"]
+        telemetry["roll"] = attrs.get("{http://ns.phaseone.com}GPSIMURoll") or telemetry["roll"]
+        telemetry["yaw_ref"] = attrs.get("{http://ns.phaseone.com}GPSIMUYawRef") or telemetry["yaw_ref"]
+
+    # 4. Fallback: Simple string search if XML structure varies
+    if not telemetry["yaw"]:
+        import re
+        for key in ["GPSIMUYaw", "GPSIMUPitch", "GPSIMURoll"]:
+            match = re.search("<aerialgps:{}>(?P<numerator>[\-0-9]+)/(?P<denominator>[\-0-9]+)</aerialgps:{}>".format(key, key), xmp_str)
+            if match:
+                telemetry[key.lower().replace("gpsimu", "")] = float(match.group('numerator'))/float(match.group('denominator'))
+    omega, phi, kappa = ypr_to_opk(*[telemetry[key] for key in ['yaw', 'pitch', 'roll']])
+    result =  {
+            'omega': float(omega),
+            'phi': float(phi),
+            'kappa': float(kappa)
+        }
+    return result
+        
+
+
+    
+
+
+
+
 
 
 def extract_dji_orientation(image_path):
@@ -198,9 +270,12 @@ def extract_dji_orientation(image_path):
     Returns a dictionary with the values or None if not found.
     """
     
-    with tempfile.NamedTemporaryFile() as temp_file:
-        download_s3_file(image_path, temp_file.name)# Read all XMP metadata into a dictionary
-        xmp_dict = file_to_dict(temp_file.name)
+    if image_path.startswith('s3://'):
+        with tempfile.NamedTemporaryFile() as temp_file:
+            download_s3_file(image_path, temp_file.name)# Read all XMP metadata into a dictionary
+            xmp_dict = file_to_dict(temp_file.name)
+    else:
+        xmp_dict = file_to_dict(image_path)
 
  
     # DJI stores orientation in the 'drone-dji' namespace
@@ -821,15 +896,21 @@ def process_image(image_path, temp_dir = '/tmp', transparency_buffer = .05):
     flight_id = image_path.split('/')[-2]
     flight = flight_id.lower().replace('__', '_')
 
-    geotag_file = "s3://dw-trackview/{}/geotags.csv".format(flight)
     
-    if s3_is_file(geotag_file):
+    
+    with smart_open('s3://dw-trackview/{}/analysis_request.json'.format(flight)) as fp : 
+        request_dict = json.load(fp)
+    if 'wingtra' in request_dict['info']['drone_model'].lower():
+        geotag_file = "s3://dw-trackview/{}/geotags.csv".format(flight)
         df_geotag = gpd.read_file(geotag_file).rename(columns = {'{} [degrees]'.format(key): key for key in ['omega', 'phi', 'kappa']})
         for key in ['omega', 'phi', 'kappa']:
             image_data[key] = float(df_geotag.loc[df_geotag['# image name'] == image_path.split('/')[-1], key].iloc[0])
-    else:
+    elif 'dji' in request_dict['info']['drone_model'].lower():
         result = extract_dji_orientation(image_path)
         image_data.update(result)
+    elif 'superwake' in request_dict['info']['drone_model'].lower():
+        result = extract_phaseone_orientation(image_path)
+        image_data.update(result)   
 
 
     x, y, utm_zone, utm_code = utm.from_latlon(image_data['lat'], image_data['lon'])
@@ -960,7 +1041,7 @@ def process_image(image_path, temp_dir = '/tmp', transparency_buffer = .05):
     for key in active_analyses:
         if request['area_track'][key] == 'Y':
             event = {'flight': flight, 'image_index': image_index}
-            
+            print(event)
             lambda_client = boto3.client("lambda")
             
             # Invoke asynchronously using InvocationType='Event'
@@ -969,6 +1050,7 @@ def process_image(image_path, temp_dir = '/tmp', transparency_buffer = .05):
                 InvocationType='Event',  # Asynchronous invocation
                 Payload=json.dumps(event).encode('utf-8')
             )
+            print(response)
 
 
     
@@ -993,6 +1075,10 @@ def lambda_handler(event, context):
 
 if __name__ == "__main__":
 
+    image_path = 'P0077324.jpg'
+    exif = extract_phaseone_orientation(image_path)
+    
+    
     bucket_name = 'ts-wkbch-file-uploads-bkt-fbef377'
     object_name = "DEMO__20250815__DEMO_Cando_Rail_Demo_Flight__1d7d91e1/Cando_Rail_Demo_Flight_Flight_01_00005.JPG"
     #bucket_name = "dw-jdiamond"
