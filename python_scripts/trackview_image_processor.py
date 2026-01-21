@@ -887,7 +887,8 @@ def align_with_tms(data):
 
 def process_image(image_path, temp_dir = '/tmp', transparency_buffer = .05):
    
-    
+    image_index = int(re.findall("(?P<image_index>[0-9]+)", image_path)[-1])
+
     image_data = extract_exif_data(image_path)
     
     output_dir = "s3://dw-trackview"
@@ -1018,10 +1019,7 @@ def process_image(image_path, temp_dir = '/tmp', transparency_buffer = .05):
     mask_polygon = convex_hull(data_mask_out)
     df_mask = tiles_covering_polygon(mask_polygon, zoom = 22)
     
-    if image_path.split('/')[-1].startswith('DJI'):
-        image_index = int(image_path.split('.')[0].split('_')[-2])
-    else:
-        image_index = int(image_path.split('.')[0].split('_')[-1])
+    
     df_mask.loc[:, 'image_index'] = image_index
     
     s3_metadata_outfile = "s3://dw-trackview/{}/metadata/metadata_{}.parquet".format(flight, image_index)
@@ -1075,14 +1073,11 @@ def lambda_handler(event, context):
 
 if __name__ == "__main__":
 
-    image_path = 'P0077324.jpg'
-    exif = extract_phaseone_orientation(image_path)
-    
-    
-    bucket_name = 'ts-wkbch-file-uploads-bkt-fbef377'
-    object_name = "DEMO__20250815__DEMO_Cando_Rail_Demo_Flight__1d7d91e1/Cando_Rail_Demo_Flight_Flight_01_00005.JPG"
-    #bucket_name = "dw-jdiamond"
-    #object_name = "test_flight_1/DJI_8843890w340w389_001_V.JPG"
+ 
+    #bucket_name = 'ts-wkbch-file-uploads-bkt-fbef377'
+    #object_name = "DEMO__20250815__DEMO_Cando_Rail_Demo_Flight__1d7d91e1/Cando_Rail_Demo_Flight_Flight_01_00005.JPG"
+    bucket_name = "dw-jdiamond"
+    object_name = "test_flight_1/DJI_8843890w340w389_001_V.JPG"
     event = json.loads(open('templates/s3_lambda_call_template.json').read().replace('bucket_name', bucket_name).replace('object_name', object_name))
     lambda_handler(event, context = None)
     
