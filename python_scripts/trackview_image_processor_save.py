@@ -1,5 +1,3 @@
-import requests 
-
 import boto3
 import botocore
 from botocore.client import Config
@@ -633,207 +631,102 @@ def write_cog_to_s3(data, s3_path, driver = 'COG', compress = 'JPEG'):
     os.system(command)
 
 
-import os
-import requests
-import tempfile
-import boto3
-from pystac_client import Client
-
-import os
-import requests
-import tempfile
-import boto3
-from pystac_client import Client
-from botocore.exceptions import ClientError
-
-import os
-import requests
-import tempfile
-import boto3
-from pystac_client import Client
-from botocore.exceptions import ClientError
-
-import os
-import requests
-import tempfile
-import boto3
-from pystac_client import Client
-from botocore.exceptions import ClientError
-
-import os
-import requests
-import tempfile
-import boto3
-from pystac_client import Client
-
-import os
-import boto3
-from botocore.config import Config
-from botocore.exceptions import ClientError
-from pystac_client import Client
-import tempfile
-
 def get_dem_data(bbox, flight):
-    # CDSE S3 Credentials
-    # IMPORTANT: Use the Access/Secret keys from the CDSE portal
-    AWS_ACCESS_KEY = "CF209QUI1QUMWG99NS0B"
-    AWS_SECRET_KEY = "QEUACb6Xl6UDsIVpbkV8uw3dTQIeJlz5la4e3GpJ"
     
-    # Destination S3 details
-    DEST_BUCKET = "dw-trackview"
     
-    # 1. Query STAC API
-    stac_url = "https://stac.dataspace.copernicus.eu/v1"
-    collection_id = "cop-dem-glo-30-dged-cog"
-
-    print("🔍 Searching STAC...")
-    catalog = Client.open(stac_url)
-    search = catalog.search(collections=[collection_id], bbox=bbox)
-    items = list(search.get_items())
-    if not items: return
-
     with tempfile.TemporaryDirectory() as temp_dir:
-        # 2. CREATE A CLEAN BOTO3 SESSION AND CLIENT
-        # This is the "Nuke" step that fixes Lambda
-        clean_session = boto3.Session()
-        
-        # Explicitly configure to IGNORE regional overrides
-        s3_config = Config(
-            signature_version='s3v4',
-            s3={'addressing_style': 'path'},
-            retries={'max_attempts': 3, 'mode': 'standard'}
-        )
 
-        # Force the client to use the specific Copernicus endpoint
-        copernicus_s3 = clean_session.client(
-            's3',
-            endpoint_url='https://eodata.dataspace.copernicus.eu',
+
+
+        # STAC collection for Copernicus DEM 30 m (DGED, GeoTIFF/COG)
+        stac_url = "https://stac.dataspace.copernicus.eu/v1"
+        collection_id = "cop-dem-glo-30-dged-cog"
+
+        # Copernicus Dataspace S3 credentials ⚠️
+        # Either set them here manually OR via environment variables (CDSE_AWS_KEY / CDSE_AWS_SECRET)
+        AWS_ACCESS_KEY = "CF209QUI1QUMWG99NS0B"
+        AWS_SECRET_KEY = "QEUACb6Xl6UDsIVpbkV8uw3dTQIeJlz5la4e3GpJ"
+
+        # ---------------------------
+        # 2. Query STAC API
+        # ---------------------------
+        catalog = Client.open(stac_url)
+        search = catalog.search(
+            collections=[collection_id],
+            bbox=bbox,
+            limit=1000
+        )
+        #items = list(search.items())
+        urls = [feature['assets']['data']['href'] for feature in search.get_all_items_as_dict()['features']]
+        print(f"Found {len(urls)} tiles in collection {collection_id}")
+
+        if len(urls) == 0:
+            raise SystemExit("No DEM tiles found for this AOI.")
+
+        # ---------------------------
+        # 3. Connect to Copernicus Dataspace S3 (authenticated)
+        # ---------------------------
+        s3 = boto3.client(
+            "s3",
+            region_name="eu-central-1",
+            endpoint_url="https://eodata.dataspace.copernicus.eu",
             aws_access_key_id=AWS_ACCESS_KEY,
             aws_secret_access_key=AWS_SECRET_KEY,
-            config=s3_config
+            config=Config(signature_version="s3v4")
         )
+        bucket = "eodata"
 
-        # 3. Download via S3
-        for item in items:
-            # Clean the key: extract path after 'eodata/'
-            key = item.assets['data'].href.split("eodata/")[-1]
-            filename = os.path.basename(key)
-            local_path = os.path.join(temp_dir, filename)
+        # ---------------------------
+        # 4. Parallel download function
+        # ---------------------------
+        def download_tile(href):
+            if href.startswith("s3://eodata/") and href.endswith(".tif"):
+                key = href.replace("s3://eodata/", "")
+                filename = os.path.join(temp_dir, os.path.basename(key))
 
-            print(f"📥 Downloading {filename} via Boto3...")
-            try:
-                # IMPORTANT: Use the exact bucket name "eodata"
-                copernicus_s3.download_file("eodata", key, local_path)
-                print(f"✅ Downloaded: {filename}")
-            except ClientError as e:
-                print(f"❌ S3 Error (Download) for {key}: {e}")
-                continue
+                if os.path.exists(filename):
+                    return f"Already exists: {filename}"
 
-        # 4. Upload to YOUR S3 Bucket
-        # We need another client for the destination bucket
-        print(f"📤 Uploading to s3://{DEST_BUCKET}...")
-        dest_s3 = boto3.client('s3') # Standard client is fine for your bucket
-        
-        for filename in os.listdir(temp_dir):
-            local_path = os.path.join(temp_dir, filename)
-            dest_key = f"{flight}/dem/{filename}"
-            try:
-                dest_s3.upload_file(local_path, DEST_BUCKET, dest_key)
-                print(f"📦 Uploaded: {dest_key}")
-            except Exception as e:
-                print(f"❌ Upload failed: {e}")
+                try:
+                    resp = s3.get_object(Bucket=bucket, Key=key, RequestPayer='requester')
+                    with open(filename, "wb") as f:
+                        for chunk in resp["Body"].iter_chunks(chunk_size=1024*1024):
+                            f.write(chunk)
+                    return f"✅ Downloaded: {filename}"
+                except Exception as e:
+                    print('bucket: {} key: {}'.format(bucket, key))
+                    return f"❌ Failed: {key} ({e})"
+            return None
 
-    print("🏁 Process complete.")
-            
-            
-            
-# def get_dem_data(bbox, flight):
-#     with tempfile.TemporaryDirectory() as temp_dir:
-#         # 1. Setup STAC and Credentials
-#         stac_url = "https://stac.dataspace.copernicus.eu/v1"
-#         collection_id = "cop-dem-glo-30-dged-cog"
+        # ---------------------------
+        # 5. Collect all URLs and run in parallel
+        # ---------------------------
+        # urls = [
+        #     asset.href
+        #     for item in items
+        #     for asset_key, asset in item.assets.items()
+        #     if asset.href.endswith(".tif")
+        # ]
 
-#         # Note: In production, consider using os.environ.get('CDSE_AWS_KEY')
-#         AWS_ACCESS_KEY = "CF209QUI1QUMWG99NS0B"
-#         AWS_SECRET_KEY = "QEUACb6Xl6UDsIVpbkV8uw3dTQIeJlz5la4e3GpJ"
+        print(f"Starting download of {len(urls)} DEM tiles...")
 
-#         # 2. Query STAC API
-#         catalog = Client.open(stac_url)
-#         search = catalog.search(
-#             collections=[collection_id],
-#             bbox=bbox,
-#             limit=1000
-#         )
-        
-#         urls = [feature['assets']['data']['href'] for feature in search.get_all_items_as_dict()['features']]
-#         print(f"Found {len(urls)} tiles in collection {collection_id}")
+        # Detect available cores and subtract one (minimum 1)
+        num_workers = max(1, os.cpu_count() - 1)
+        print(f"Using {num_workers} parallel workers")
 
-#         if len(urls) == 0:
-#             print("⚠️ No DEM tiles found for this AOI.")
-#             return
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(download_tile, u) for u in urls]
+            for future in as_completed(futures):
+                print(future.result())
 
-#         session = boto3.Session()
+        print("✅ All downloads finished.")
 
-#         # 3. Robust S3 Client Configuration for Lambda
-#         s3_config = Config(
-#             signature_version="s3v4",
-#             s3={'addressing_style': 'path'},
-#             # 'us-east-1' is the "global" default for signatures; 
-#             # sometimes changing this helps bypass regional redirect logic
-#             region_name="eu-central-1" 
-#         )
-
-#         s3 = session.client(
-#             "s3",
-#             endpoint_url="https://eodata.dataspace.copernicus.eu",
-#             aws_access_key_id=AWS_ACCESS_KEY,
-#             aws_secret_access_key=AWS_SECRET_KEY,
-#             config=s3_config
-#         )
-
-#         def download_tile(href):
-#             # Ensure the key is clean
-#             key = href.replace("s3://eodata/", "").split("eodata/")[-1]
-#             filename = os.path.join(temp_dir, os.path.basename(key))
-
-#             try:
-#                 # Use get_object and stream to avoid memory/metadata errors
-#                 response = s3.get_object(Bucket="eodata", Key=key)
-                
-#                 with open(filename, 'wb') as f:
-#                     for chunk in response['Body'].iter_chunks(chunk_size=1024*1024):
-#                         f.write(chunk)
-                        
-#                 print(f"✅ Successfully Downloaded to Lambda: {filename}")
-#             except Exception as e:
-#                 print(f"❌ Failed for {key}: {str(e)}")
-
-
-
-#         for url in urls:
-#             print("downloading {}".format(url))
-#             download_tile(url)
-
-#         # 6. Upload to your own bucket
-#         # Using boto3 client here is faster/more reliable than os.system('aws s3 cp') inside loops
-#         dest_s3 = boto3.client('s3')
-#         dest_bucket = "dw-trackview"
-        
-#         print("Uploading DEM tiles to internal storage...")
-#         file_list = os.listdir(temp_dir)
-#         path_list = ["{}/{}".format(temp_dir,file) for file in file_list]
-#         print("files = {}".format(file_list))
-#         for filename in file_list:
-#             local_path = "{}/{}".format(temp_dir,filename)
-#             dest_key = f"{flight}/dem/{filename}"
-#             try:
-#                 dest_s3.upload_file(local_path, dest_bucket, dest_key)
-#                 print(f"📦 Uploaded to s3://{dest_bucket}/{dest_key}")
-#                 print("✅ get_dem_data process complete.")
-#             except Exception as e:
-#                 print(f"❌ Failed to upload {filename}: {e}")
-
-        
+        dem_files = ["{}/{}".format(temp_dir, filename) for filename in os.listdir(temp_dir)]
+        for dem_file in dem_files:
+            outfile_prefix = dem_file.split('/')[-1]
+            command = "aws s3 cp {} s3://dw-trackview/{}/dem/".format(dem_file, flight, outfile_prefix)
+            print(command)
+            os.system(command)
 
     
 
@@ -1027,70 +920,6 @@ def get_epsg_from_latlon(lat, lon):
     return f"epsg:{epsg_code}"
 
 
-
-# The function we built in the previous step
-def request_dem_processing(ip, lat, lon, timeout=300):
-    url = f"http://{ip}:5000/process-dem"
-    try:
-        response = requests.post(url, json={"lat": lat, "lon": lon}, timeout=timeout)
-        if response.status_code == 200:
-            return response.json()
-        return {"status": "error", "message": f"API Error: {response.status_code}", "s3_path": None}
-    except Exception as e:
-        return {"status": "error", "message": str(e), "s3_path": None}
-
-def run_dem_task_with_instance_management(lat, lon):
-    instance_id = 'i-0607e8b994075d514'
-    ec2 = boto3.client('ec2', region_name='ca-central-1') # Update region as needed
-    
-    # 1. Check Instance State
-    print(f"Checking status of {instance_id}...")
-    response = ec2.describe_instances(InstanceIds=[instance_id])
-    instance = response['Reservations'][0]['Instances'][0]
-    state = instance['State']['Name']
-    ip_address = instance.get('PublicIpAddress', '15.157.113.236')
-
-    was_running = (state == 'running')
-
-    # 2. Start Instance if not running
-    if not was_running:
-        print(f"Instance is {state}. Starting now...")
-        ec2.start_instances(InstanceIds=[instance_id])
-        
-        # Wait for EC2 to report 'running'
-        waiter = ec2.get_waiter('instance_running')
-        waiter.wait(InstanceIds=[instance_id])
-        print("Instance is running. Waiting for Flask app to initialize...")
-        
-        # 3. Poll for Flask Readiness (Allow time for Crontab/Boot)
-        max_retries = 30
-        for i in range(max_retries):
-            try:
-                # Simple GET to root or health check
-                check = requests.get(f"http://{ip_address}:5000/", timeout=2)
-                print("✅ Flask API is ready.")
-                break
-            except requests.exceptions.ConnectionError:
-                if i % 5 == 0: print(f"Still waiting for API... (Attempt {i}/{max_retries})")
-                time.sleep(5)
-        else:
-            return {"status": "error", "message": "Timeout waiting for Flask to start."}
-
-    # 4. Process the DEM
-    print(f"🚀 Sending request for Lat: {lat}, Lon: {lon}...")
-    result = request_dem_processing(ip_address, lat, lon)
-    
-    # 5. Stop Instance if we started it
-    if not was_running:
-        print(f"Task complete. Stopping instance {instance_id} to save costs...")
-        ec2.stop_instances(InstanceIds=[instance_id])
-    else:
-        print("Instance was already running; leaving it active.")
-
-    return result
-
-
-
 def process_image(image_path, temp_dir = '/tmp', transparency_buffer = .05):
    
     image_index = int(re.findall("(?P<image_index>[0-9]+)", image_path)[-1])
@@ -1132,53 +961,34 @@ def process_image(image_path, temp_dir = '/tmp', transparency_buffer = .05):
     image_data['y'] = df_point.geometry.iloc[0].y
 
     
-    lon, lat = image_data['lon'], image_data['lat']
-    lon_floor, lat_floor = np.floor([lon, lat]).astype(int)
-    dem_file = "s3://dw-trackview/dem/dem_{}_{}.tif".format(lon_floor, lat_floor)
-    if not s3_is_file(dem_file):
-        result = run_dem_task_with_instance_management(lat, lon)
-
-    dem_data = rioxarray.open_rasterio(dem_file)[0]
-    polygon = get_shapely_bbox_from_dataarray(dem_data)
-    image_data['elevation'] = float(dem_data.sel(x = image_data['lon'], y = image_data['lat'], method = 'nearest'))
-    image_data['dem_path'] = dem_file
-    print('got elevation')
+    df_bounds = gpd.GeoDataFrame().set_geometry([box(image_data['x'] - 50, image_data['y'] - 50, image_data['x'] + 50, image_data['y'] + 50)])\
+        .set_crs(image_data['crs']).to_crs('epsg:4326')
+    dem_files = s3_list_files(boto3, 's3://dw-trackview/{}/dem'.format(flight))
     
+    #if there are no dem files, get dem file for this location
+    if len(dem_files) == 0:
+        get_dem_data(list(df_bounds.geometry.iloc[0].bounds), flight)
     
-    # df_bounds = gpd.GeoDataFrame().set_geometry([box(image_data['x'] - 50, image_data['y'] - 50, image_data['x'] + 50, image_data['y'] + 50)])\
-    #     .set_crs(image_data['crs']).to_crs('epsg:4326')
-    # dem_files = s3_list_files(boto3, 's3://dw-trackview/{}/dem'.format(flight))
+    #get elevation from existing dem files on s3 if it covers this location
+    dem_files = s3_list_files(boto3, 's3://dw-trackview/{}/dem'.format(flight))
+    for dem_file in dem_files:
+        dem_data = rioxarray.open_rasterio(dem_file)[0]
+        polygon = get_shapely_bbox_from_dataarray(dem_data)
+        if polygon.contains(Point(image_data['lon'], image_data['lat'])):
+            image_data['elevation'] = float(dem_data.sel(x = image_data['lon'], y = image_data['lat'], method = 'nearest'))
+            image_data['dem_path'] = dem_file
+            break
     
-    # #if there are no dem files, get dem file for this location
-    # if len(dem_files) == 0:
-    #     get_dem_data(list(df_bounds.geometry.iloc[0].bounds), flight)
-    
-    # #get elevation from existing dem files on s3 if it covers this location
-    # dem_files = s3_list_files(boto3, 's3://dw-trackview/{}/dem'.format(flight))
-    # print('we have {} dem files'.format(len(dem_files)))
-    # for dem_file in dem_files:
-    #     dem_data = rioxarray.open_rasterio(dem_file)[0]
-    #     polygon = get_shapely_bbox_from_dataarray(dem_data)
-    #     if polygon.contains(Point(image_data['lon'], image_data['lat'])):
-    #         image_data['elevation'] = float(dem_data.sel(x = image_data['lon'], y = image_data['lat'], method = 'nearest'))
-    #         image_data['dem_path'] = dem_file
-    #         print('got elevation')
-    #         break
-    #     else:
-    #         print("{},{} not in {}".format(image_data['lon'], image_data['lat'], dem_file))
-    
-    # #if this location is not covered by existing dem_files, get dem file for this location
-    # if 'elevation' not in image_data :
-    #     get_dem_data(list(df_bounds.geometry.iloc[0].bounds), flight)
-    # dem_files = s3_list_files(boto3, 's3://dw-trackview/{}/dem'.format(flight))
-    # print('got more... now we have {} dem files'.format(len(dem_files)))
-    # for dem_file in dem_files: #get elevation from the dem files
-    #     dem_data = rioxarray.open_rasterio(dem_file)[0]
-    #     polygon = get_shapely_bbox_from_dataarray(dem_data)
-    #     if polygon.contains(Point(image_data['lon'], image_data['lat'])):
-    #         image_data['elevation'] = float(dem_data.sel(x = image_data['lon'], y = image_data['lat'], method = 'nearest'))
-    #         image_data['dem_path'] = dem_file
-    #         break
+    #if this location is not covered by existing dem_files, get dem file for this location
+    if 'elevation' not in image_data :
+        get_dem_data(list(df_bounds.geometry.iloc[0].bounds), flight)
+    for dem_file in dem_files: #get elevation from the dem files
+        dem_data = rioxarray.open_rasterio(dem_file)[0]
+        polygon = get_shapely_bbox_from_dataarray(dem_data)
+        if polygon.contains(Point(image_data['lon'], image_data['lat'])):
+            image_data['elevation'] = float(dem_data.sel(x = image_data['lon'], y = image_data['lat'], method = 'nearest'))
+            image_data['dem_path'] = dem_file
+            break
 
    
     
@@ -1305,7 +1115,7 @@ if __name__ == "__main__":
     #bucket_name = 'ts-wkbch-file-uploads-bkt-fbef377'
     #object_name = "DEMO__20250815__DEMO_Cando_Rail_Demo_Flight__1d7d91e1/Cando_Rail_Demo_Flight_Flight_01_00005.JPG"
     bucket_name ="ts-wkbch-file-uploads-bkt-fbef377"
-    object_name = "DEMO__20260227__cando_north_2__d6d81a20/Cando_Rail_Demo_Flight_Flight_01_00101.JPG"
+    object_name = "HBR__20260226__test-lite-user-flight-cando__5c06dfc8/Cando_Rail_Demo_Flight_Flight_01_00002.JPG"
     event = json.loads(open('templates/s3_lambda_call_template.json').read().replace('bucket_name', bucket_name).replace('object_name', object_name))
     lambda_handler(event, context = None)
     

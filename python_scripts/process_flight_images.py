@@ -25,7 +25,7 @@ def s3_list_files(session, s3_path):
 
 
 bucket_name = "ts-wkbch-file-uploads-bkt-fbef377"
-flight_id = "DEMO__20250815__DEMO_Cando_Rail_Demo_Flight__1d7d91e1"
+flight_id = "DEMO__20260227__cando_north_2__d6d81a20"
 
 
 image_folder = "s3://{}/{}".format(bucket_name, flight_id)
@@ -35,6 +35,7 @@ event_template = open('templates/s3_lambda_call_template.json').read()
 client = boto3.client("lambda")
 
 for image_path in image_paths:
+    print('running {}'.format(image_path))
     object_name = "{}/{}".format(flight_id, image_path.split('/')[-1])
     event = json.loads(event_template.replace('bucket_name', bucket_name).replace('object_name', object_name))
 
